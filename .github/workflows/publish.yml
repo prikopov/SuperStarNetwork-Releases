@@ -1,0 +1,46 @@
+name: Publish Windows installer
+on:
+  push:
+    branches: [incoming]
+    paths: [package/latest.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: incoming
+          persist-credentials: false
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=$(jq -er '.version | select(test("^[0-9]+\\.[0-9]+\\.[0-9]+$"))' package/latest.json)
+          tag="v$version"
+          name="SuperStarNetwork_${version}_x64-setup.exe"
+          test -s "package/$name"
+          test -s "package/$name.sig"
+          test "$(jq -er '.platforms["windows-x86_64"].signature' package/latest.json)" = "$(tr -d '\r\n' < "package/$name.sig")"
+          test "$(jq -er '.platforms["windows-x86_64"].url' package/latest.json)" = "https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/$name"
+          if gh release view "$tag" --json isDraft --jq 'select(.isDraft == false)' | grep -q .; then exit 0; fi
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "package/$name" "package/$name.sig" package/latest.json --clobber
+          else
+            gh release create "$tag" --target main --draft --title "SuperStarNetwork $version" \
+              --notes "Windows x64 · NSIS" "package/$name" "package/$name.sig" package/latest.json
+          fi
+          newest=$(gh release list --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName' |
+            { cat; echo "$tag"; } | sort -V | tail -n 1)
+          latest=false
+          if test "$newest" = "$tag"; then latest=true; fi
+          gh release edit "$tag" --draft=false --latest="$latest"
