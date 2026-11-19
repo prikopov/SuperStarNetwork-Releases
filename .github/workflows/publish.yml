@@ -32,12 +32,14 @@ jobs:
           test -s "package/$name.sig"
           test "$(jq -er '.platforms["windows-x86_64"].signature' package/latest.json)" = "$(tr -d '\r\n' < "package/$name.sig")"
           test "$(jq -er '.platforms["windows-x86_64"].url' package/latest.json)" = "https://github.com/${GITHUB_REPOSITORY}/releases/download/$tag/$name"
+          assets=("package/$name" "package/$name.sig" package/latest.json)
+          if test -s package/xray-source.patch; then assets+=(package/xray-source.patch); fi
           if gh release view "$tag" --json isDraft --jq 'select(.isDraft == false)' | grep -q .; then exit 0; fi
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" "package/$name" "package/$name.sig" package/latest.json --clobber
+            gh release upload "$tag" "${assets[@]}" --clobber
           else
             gh release create "$tag" --target main --draft --title "SuperStarNetwork $version" \
-              --notes "Windows x64 · NSIS" "package/$name" "package/$name.sig" package/latest.json
+              --notes "Windows x64 · NSIS" "${assets[@]}"
           fi
           newest=$(gh release list --exclude-drafts --exclude-pre-releases --json tagName --jq '.[].tagName' |
             { cat; echo "$tag"; } | sort -V | tail -n 1)
