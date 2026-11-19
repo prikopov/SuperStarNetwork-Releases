@@ -1,0 +1,355 @@
+diff --git a/proxy/tun/handler.go b/proxy/tun/handler.go
+index 59b643b..4e52ae4 100644
+--- a/proxy/tun/handler.go
++++ b/proxy/tun/handler.go
+@@ -3,6 +3,8 @@ package tun
+ import (
+ 	"context"
+ 	"net/netip"
++	"os"
++	"strconv"
+ 	"strings"
+ 	"syscall"
+ 
+@@ -121,6 +123,14 @@ func (t *Handler) Init(ctx context.Context, pm policy.Manager, dispatcher routin
+ }
+ 
+ func (t *Handler) Start() error {
++	maxTCP, err := ssnFlowLimit("SSN_TUN_TCP_LIMIT")
++	if err != nil {
++		return err
++	}
++	maxUDP, err := ssnFlowLimit("SSN_TUN_UDP_LIMIT")
++	if err != nil {
++		return err
++	}
+ 	tunName := t.config.Name
+ 	tunInterface, err := NewTun(t.config)
+ 	if err != nil {
+@@ -169,6 +179,8 @@ func (t *Handler) Start() error {
+ 		Tun:         tunInterface,
+ 		MTU:         t.config.MTU,
+ 		IdleTimeout: t.policyManager.ForLevel(t.config.UserLevel).Timeouts.ConnectionIdle,
++		MaxTCP:      maxTCP,
++		MaxUDP:      maxUDP,
+ 	}
+ 	tunStack, err := NewStack(t.ctx, tunStackOptions, t)
+ 	if err != nil {
+@@ -209,6 +221,19 @@ func (t *Handler) Start() error {
+ 	return nil
+ }
+ 
++// ssnFlowLimit reads the desktop supervisor's per-process settings.
++func ssnFlowLimit(name string) (int, error) {
++	value := os.Getenv(name)
++	if value == "" {
++		return 0, nil
++	}
++	n, err := strconv.Atoi(value)
++	if err != nil || n < 0 || n > 4096 {
++		return 0, errors.New("invalid ", name, ": expected 0..4096")
++	}
++	return n, nil
++}
++
+ // HandleConnection pass the connection coming from the ip stack to the routing dispatcher
+ func (t *Handler) HandleConnection(conn net.Conn, destination net.Destination) {
+ 	// when handling is done with any outcome, always signal back to the incoming connection
+diff --git a/proxy/tun/stack.go b/proxy/tun/stack.go
+index 5048ae9..9c22859 100644
+--- a/proxy/tun/stack.go
++++ b/proxy/tun/stack.go
+@@ -37,6 +37,8 @@ type StackOptions struct {
+ 	Tun         Tun
+ 	MTU         uint32
+ 	IdleTimeout time.Duration
++	MaxTCP      int
++	MaxUDP      int
+ 	// Addresses are what the stack opens connections from
+ 	Addresses []netip.Addr
+ 	// Remote is set if the tun is a tunnel to another system and not the tun of this one: what comes through it
+@@ -62,6 +64,7 @@ type stack struct {
+ 	segmenter segmenter
+ 	// window is the window of every connection
+ 	window int32
++	maxTCP int
+ 	// verify is set if the checksums of what comes are looked at
+ 	verify bool
+ 	// stamps is set if connections carry the times of RFC 7323 when the other side does
+@@ -98,6 +101,7 @@ func NewStack(ctx context.Context, options StackOptions, handler ConnectionHandl
+ 		tun:       options.Tun,
+ 		mtu:       int(options.MTU),
+ 		window:    tcpWindow,
++		maxTCP:    options.MaxTCP,
+ 		addresses: options.Addresses,
+ 		verify:    options.Remote,
+ 		stamps:    options.Remote,
+@@ -117,6 +121,7 @@ func NewStack(ctx context.Context, options StackOptions, handler ConnectionHandl
+ 	if handler != nil {
+ 		s.handle = handler.HandleConnection
+ 		s.udp = newUdpConnectionHandler(s.handle, s.writeUDP)
++		s.udp.maxConns = options.MaxUDP
+ 	}
+ 	return s, nil
+ }
+@@ -335,16 +340,22 @@ func (s *stack) handleTCP(p packet) {
+ 	if s.opening.Load() >= tcpOpening {
+ 		return
+ 	}
+-	c = newTCPConn(s, f)
+-	c.synchronize(seg)
+ 	s.mu.Lock()
+-	if s.closed {
++	current := s.conns[f]
++	if s.closed || (current != nil && current != c) {
++		s.mu.Unlock()
++		return
++	}
++	if current == nil && s.maxTCP > 0 && len(s.conns) >= s.maxTCP {
+ 		s.mu.Unlock()
++		s.refuse(f, seg)
+ 		return
+ 	}
++	c = newTCPConn(s, f)
++	c.synchronize(seg)
+ 	s.conns[f] = c
+-	s.mu.Unlock()
+ 	s.opening.Add(1)
++	s.mu.Unlock()
+ 	c.mu.Lock()
+ 	c.sendSyn()
+ 	c.arm(tcpTick)
+diff --git a/proxy/tun/stack_test.go b/proxy/tun/stack_test.go
+index e6b7b31..3eab26f 100644
+--- a/proxy/tun/stack_test.go
++++ b/proxy/tun/stack_test.go
+@@ -379,6 +379,35 @@ func read(t *testing.T, conn net.Conn, expected string) {
+ }
+ 
+ // The options of the SYN decide what the answer has, and both ends close the connection in turn.
++func TestSSNTCPFlowLimit(t *testing.T) {
++	accepted := make(chan accepted, 2)
++	p, l := newPeer(t, "10.0.0.1:1234", "10.0.0.2:80")
++	st, err := NewStack(context.Background(), StackOptions{Tun: l, MTU: testMTU, MaxTCP: 1}, testHandler(accept(accepted)))
++	if err != nil {
++		t.Fatal(err)
++	}
++	s := st.(*stack)
++	s.Start()
++	t.Cleanup(func() { s.Close(); l.Close() })
++	p.connect(nil)
++	_ = take(t, accepted)
++	other := *p
++	other.src = netip.MustParseAddrPort("10.0.0.1:1235")
++	other.seq, other.ack = 2000, 0
++	other.send(other.seq, tcpSyn, nil, nil)
++	if seg := other.receive(); seg.flags&tcpRst == 0 {
++		t.Fatal("extra connection was not refused")
++	}
++	p.send(p.seq, tcpRst|tcpAck, nil, nil)
++	forgotten(t, s)
++	other.connect(nil)
++	_ = take(t, accepted)
++}
++
++type testHandler func(net.Conn, net.Destination)
++
++func (f testHandler) HandleConnection(conn net.Conn, dest net.Destination) { f(conn, dest) }
++
+ func TestTCPHandshakeAndClose(t *testing.T) {
+ 	for _, test := range []struct {
+ 		src, dst          string
+diff --git a/proxy/tun/tun_windows_wfp.go b/proxy/tun/tun_windows_wfp.go
+index 86278c8..1647b6a 100644
+--- a/proxy/tun/tun_windows_wfp.go
++++ b/proxy/tun/tun_windows_wfp.go
+@@ -8,6 +8,7 @@ import (
+ 	"os"
+ 	"runtime"
+ 	"slices"
++	"strconv"
+ 	"strings"
+ 	"unsafe"
+ 
+@@ -68,6 +69,7 @@ var (
+ 
+ 	fwpmConditionFlags              = windows.GUID{Data1: 0x632ce23b, Data2: 0x5167, Data3: 0x435c, Data4: [8]byte{0x86, 0xd7, 0xe9, 0x03, 0x68, 0x4a, 0xa8, 0x0c}}
+ 	fwpmConditionIPArrivalInterface = windows.GUID{Data1: 0x618a9b6d, Data2: 0x386b, Data3: 0x4136, Data4: [8]byte{0xad, 0x6e, 0xb5, 0x15, 0x87, 0xcf, 0xb1, 0xcd}}
++	fwpmConditionIPLocalAddress     = windows.GUID{Data1: 0xd9ee00de, Data2: 0xc1ef, Data3: 0x4617, Data4: [8]byte{0xbf, 0xe3, 0xff, 0xd8, 0xf5, 0xa0, 0x89, 0x57}}
+ 	fwpmConditionIPLocalInterface   = windows.GUID{Data1: 0x4cd62a49, Data2: 0x59c3, Data3: 0x4969, Data4: [8]byte{0xb7, 0xf3, 0xbd, 0xa5, 0xd3, 0x28, 0x90, 0xa4}}
+ 	fwpmConditionIPLocalPort        = windows.GUID{Data1: 0x0c1ba1af, Data2: 0x5765, Data3: 0x453f, Data4: [8]byte{0xaf, 0x22, 0xa8, 0xf7, 0x91, 0xac, 0x77, 0x5b}} // also FWPM_CONDITION_ICMP_TYPE
+ 	fwpmConditionIPNexthopInterface = windows.GUID{Data1: 0x93ae8f5b, Data2: 0x7f6f, Data3: 0x4719, Data4: [8]byte{0x98, 0xc8, 0x14, 0xe9, 0x74, 0x29, 0xef, 0x04}}
+@@ -324,6 +326,8 @@ func dnsClientUsesAnyPort() bool {
+ const (
+ 	weightAllExceptLAN uint8 = iota // block "allexceptlan"
+ 	weightLAN                       // permit its local network
++	weightGeneral                   // block all while keeping the hotspot exception below DNS filters
++	weightHotspot                   // permit local services on the Windows hotspot only
+ 	weightDNSClient                 // block "windnsclient"
+ 	weightLocalLink                 // permit its mDNS and LLMNR on the local network
+ 	weightBlock                     // block the other values
+@@ -507,6 +511,14 @@ func addLeakFilters(engine windows.Handle, tun winipcfg.LUID, block leakFilters)
+ 		}}
+ 	}
+ 
++	hotspotLUID, hotspotIP, hotspotSubnet, err := ssnHotspot()
++	if err != nil {
++		return err
++	}
++	if hotspotLUID != nil {
++		pinner.Pin(hotspotLUID)
++	}
++
+ 	// What stays allowed whatever is blocked, in both directions: replies to
+ 	// a connection accepted from outside would leave through the physical
+ 	// link as well.
+@@ -564,6 +576,18 @@ func addLeakFilters(engine windows.Handle, tun winipcfg.LUID, block leakFilters)
+ 				return err
+ 			}
+ 		}
++		if hotspotLUID != nil && !layer.ipv6 {
++			local := hotspotIP.As4()
++			via := uintptr(unsafe.Pointer(hotspotLUID))
++			localService := []fwpmFilterCondition0{
++				condition(&fwpmConditionIPLocalInterface, fwpUint64, via),
++				condition(layer.via, fwpUint64, via),
++				condition(&fwpmConditionIPLocalAddress, fwpUint32, uintptr(binary.BigEndian.Uint32(local[:]))),
++			}
++			if err := add(layer.key, "permit Windows hotspot local services", 0, fwpActionPermit, weightHotspot, slices.Concat(localService, remote(hotspotSubnet))...); err != nil {
++				return err
++			}
++		}
+ 		for _, l := range block {
+ 			prefix, ok := l.over(layer.ipv6)
+ 			if !ok {
+@@ -592,7 +616,11 @@ func addLeakFilters(engine windows.Handle, tun winipcfg.LUID, block leakFilters)
+ 				matches = append(matches, condition(&fwpmConditionIPProtocol, fwpUint8, protocol))
+ 			}
+ 			matches = slices.Concat(matches, toPorts(l), remote(prefix))
+-			if err := add(layer.key, "block "+l.String(), 0, fwpActionBlock, weightBlock, matches...); err != nil {
++			weight := weightBlock
++			if l.name == "all" && hotspotLUID != nil && !layer.ipv6 {
++				weight = weightGeneral
++			}
++			if err := add(layer.key, "block "+l.String(), 0, fwpActionBlock, weight, matches...); err != nil {
+ 				return err
+ 			}
+ 		}
+@@ -649,6 +677,22 @@ func addLeakFilters(engine windows.Handle, tun winipcfg.LUID, block leakFilters)
+ 	return nil
+ }
+ 
++// ssnHotspot receives the already detected Windows Mobile Hotspot adapter and
++// its IPv4 address/prefix from the desktop supervisor.
++func ssnHotspot() (*uint64, netip.Addr, netip.Prefix, error) {
++	value := os.Getenv("SSN_HOTSPOT")
++	if value == "" {
++		return nil, netip.Addr{}, netip.Prefix{}, nil
++	}
++	luidText, cidr, ok := strings.Cut(value, ",")
++	luid, luidErr := strconv.ParseUint(luidText, 10, 64)
++	prefix, prefixErr := netip.ParsePrefix(cidr)
++	if !ok || luidErr != nil || luid == 0 || prefixErr != nil || !prefix.Addr().Is4() || !prefix.Addr().IsPrivate() || prefix.Bits() < 16 || prefix.Bits() > 30 {
++		return nil, netip.Addr{}, netip.Prefix{}, errors.New("invalid SSN_HOTSPOT adapter")
++	}
++	return &luid, prefix.Addr(), prefix.Masked(), nil
++}
++
+ func addFilter(engine windows.Handle, sublayer, layer *windows.GUID, name string, flags, action uint32, weight uint8, conditions ...fwpmFilterCondition0) error {
+ 	filter := fwpmFilter0{
+ 		displayData:         fwpmDisplayData0{name: utf16Ptr(name)},
+diff --git a/proxy/tun/tun_windows_wfp_test.go b/proxy/tun/tun_windows_wfp_test.go
+index 47c6f70..d1e9bab 100644
+--- a/proxy/tun/tun_windows_wfp_test.go
++++ b/proxy/tun/tun_windows_wfp_test.go
+@@ -8,6 +8,7 @@ import (
+ 	"net"
+ 	"net/netip"
+ 	"slices"
++	"strconv"
+ 	"testing"
+ 	"unsafe"
+ 
+@@ -151,6 +152,19 @@ func TestLeakFiltersAccepted(t *testing.T) {
+ 	}
+ }
+ 
++func TestSSNHotspotFiltersAccepted(t *testing.T) {
++	loopback, err := winipcfg.LUIDFromIndex(1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("SSN_HOTSPOT", strconv.FormatUint(uint64(loopback), 10)+",192.168.137.1/24")
++	luid, address, subnet, err := ssnHotspot()
++	if err != nil || luid == nil || *luid != uint64(loopback) || address.String() != "192.168.137.1" || subnet.String() != "192.168.137.0/24" {
++		t.Fatal("hotspot adapter was not parsed")
++	}
++	TestLeakFiltersAccepted(t)
++}
++
+ func TestNewLeakFilters(t *testing.T) {
+ 	for _, c := range []struct {
+ 		values         []string
+diff --git a/proxy/tun/udp_fullcone.go b/proxy/tun/udp_fullcone.go
+index 6a71f4b..7410182 100644
+--- a/proxy/tun/udp_fullcone.go
++++ b/proxy/tun/udp_fullcone.go
+@@ -16,6 +16,7 @@ type udpConnectionHandler struct {
+ 	sync.RWMutex
+ 
+ 	udpConns map[net.Destination]*udpConn
++	maxConns int
+ 
+ 	handleConnection func(conn net.Conn, dest net.Destination)
+ 	writePacket      func(data []byte, src net.Destination, dst net.Destination) error
+@@ -53,6 +54,10 @@ func (u *udpConnectionHandler) HandlePacket(src net.Destination, dst net.Destina
+ 
+ 	conn, found = u.udpConns[src]
+ 	if !found {
++		if u.maxConns > 0 && len(u.udpConns) >= u.maxConns {
++			data.Release()
++			return
++		}
+ 		conn = &udpConn{handler: u, queue: newPacketQueue(udpQueueLimit), src: src, dst: dst}
+ 		u.udpConns[src] = conn
+ 
+diff --git a/proxy/tun/udp_fullcone_test.go b/proxy/tun/udp_fullcone_test.go
+index f764830..49e6a08 100644
+--- a/proxy/tun/udp_fullcone_test.go
++++ b/proxy/tun/udp_fullcone_test.go
+@@ -8,6 +8,35 @@ import (
+ 	"github.com/xtls/xray-core/common/net"
+ )
+ 
++func TestSSNUDPSessionLimit(t *testing.T) {
++	accepted := make(chan net.Conn, 2)
++	u := newUdpConnectionHandler(func(c net.Conn, _ net.Destination) { accepted <- c }, nil)
++	u.maxConns = 1
++	dst := net.UDPDestination(net.ParseAddress("1.1.1.1"), 443)
++	first := net.UDPDestination(net.ParseAddress("10.0.0.1"), 1234)
++	other := net.UDPDestination(net.ParseAddress("10.0.0.1"), 1235)
++	u.HandlePacket(first, dst, buf.New())
++	conn := <-accepted
++	u.HandlePacket(other, dst, buf.New())
++	if len(u.udpConns) != 1 || u.udpConns[other] != nil {
++		t.Fatal("an extra UDP session was admitted")
++	}
++	u.HandlePacket(first, dst, buf.New())
++	for i := 0; i < 2; i++ {
++		mb, err := conn.(buf.Reader).ReadMultiBuffer()
++		if err != nil {
++			t.Fatal(err)
++		}
++		buf.ReleaseMulti(mb)
++	}
++	conn.Close()
++	u.HandlePacket(other, dst, buf.New())
++	conn = <-accepted
++	mb, _ := conn.(buf.Reader).ReadMultiBuffer()
++	buf.ReleaseMulti(mb)
++	conn.Close()
++}
++
+ // BenchmarkUDPNewSession measures what one new UDP flow costs the
+ // inbound while it stays open: QUIC and DNS open many short flows, and each
+ // one lives until the connection idle timeout.
