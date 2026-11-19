@@ -1,0 +1,10 @@
+{
+  "version": "0.2.2",
+  "notes": "SuperStarNetwork 0.2.2",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSRHpJUmNwQXVUem5Gb2hVMmJwTnhnWFFmZFFvVG5BNTZjTDQyWG5zSGxxcWFzdzkxRVRodTdhcXQ2dHZzYittK0hxZlowTCtGeUE1Q2dPRUFlVzVneXd3V1pJMmlkdEFJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MTI3MDAzCWZpbGU6U3VwZXJTdGFyTmV0d29ya18wLjIuMl94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4yLjIKVlNURXg0Sk4wamc2aWFiSHo0LzB1N2NLNnFlOC8yc0NQVEtSRTlBalY3R0EwU0Irc1VlZlQ1YlRnd00zRVI4YlBzYU0wWWtFQS85REpLSVN4T0IvRGc9PQo=",
+      "url": "https://github.com/prikopov/SuperStarNetwork-Releases/releases/download/v0.2.2/SuperStarNetwork_0.2.2_x64-setup.exe"
+    }
+  }
+}
