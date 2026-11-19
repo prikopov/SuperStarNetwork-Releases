@@ -1,10 +1,10 @@
 {
+  "version": "0.2.4",
   "platforms": {
     "windows-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSRHpJUmNwQXVUenNUSTlDTlRsOE1zeFhHTGpKbUlLL01BditrMnZOYzgzQ1R6WllzSVo0REVHaU83a3ZoWDl4bm0vcTBMaTEvcWYvNXp5WVZPQk53Q3JwNzNVNTBFSFFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MTMwMDI0CWZpbGU6U3VwZXJTdGFyTmV0d29ya18wLjIuNF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4yLjQKVDlZNHJMNkpFZlllY2syZDduaVFsWG5SbjJ2a1hkWXVjaUpreDNvbHV1WHVrcnZuN0RCQ1M5Mzg4czJ4RXd2QzFMN3lwdUVwQlVVWGFLVUo1QklVQmc9PQo=",
-      "url": "https://github.com/prikopov/SuperStarNetwork-Releases/releases/download/v0.2.4/SuperStarNetwork_0.2.4_x64-setup.exe"
+      "url": "https://github.com/prikopov/SuperStarNetwork-Releases/releases/download/v0.2.4/SuperStarNetwork_0.2.4_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSRHpJUmNwQXVUenV4SWp2Z3h4MURPU2VFaHl3MldCOTh2RGQvL3hQdXBnbHFtczhrQXBRK3dCdldxSHFqaFlZaE5iWUpaY2Nrci82UXoraWxnQkpiZTkzbkVuOHVGbkFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1MTMwOTE2CWZpbGU6U3VwZXJTdGFyTmV0d29ya18wLjIuNF94NjQtc2V0dXAuZXhlCXZlcnNpb246MC4yLjQKbU1Od3FQdUpOT3pUdFQwR3NnL2lvV1FsRVp1cUI1bkc3b3paWU5IVkM4cHNUVG1IbWpPUFFHa1B5ODRGcndvZEJRZDYvdGZQMUhTR1J2THEzSCtxQ3c9PQo="
     }
   },
-  "notes": "SuperStarNetwork 0.2.4",
-  "version": "0.2.4"
+  "notes": "SuperStarNetwork 0.2.4"
 }
