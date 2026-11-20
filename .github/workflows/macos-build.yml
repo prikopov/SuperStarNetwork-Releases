@@ -1,0 +1,111 @@
+name: Build macOS prerelease
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Full commit SHA from the private SuperStarNetwork repository
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-prerelease-build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main' && github.actor == github.repository_owner
+    environment: macos-private-source
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: amd64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 27
+    steps:
+      - name: Check out the private source snapshot
+        shell: bash
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          SOURCE_KEY: ${{ secrets.SOURCE_READ_KEY }}
+        run: |
+          set -euo pipefail
+          [[ $SOURCE_COMMIT =~ ^[a-f0-9]{40}$ ]]
+          umask 077
+          key=$(mktemp "$RUNNER_TEMP/source-key.XXXXXX")
+          hosts=$(mktemp "$RUNNER_TEMP/source-hosts.XXXXXX")
+          logs=$(mktemp -d "$RUNNER_TEMP/source-logs.XXXXXX")
+          trap 'rm -f -- "$key" "$hosts"' EXIT
+          printf '%s\n' "$SOURCE_KEY" > "$key"
+          unset SOURCE_KEY
+          printf '%s\n' 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$hosts"
+          printf 'SSN_LOGS=%s\n' "$logs" >> "$GITHUB_ENV"
+          export GIT_SSH_COMMAND="ssh -i \"$key\" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=\"$hosts\""
+          git init --quiet source > "$logs/source" 2>&1
+          git -C source fetch --no-tags --depth=1 git@github.com:prikopov/SuperStarNetwork.git "$SOURCE_COMMIT" >> "$logs/source" 2>&1
+          git -C source checkout --quiet --detach FETCH_HEAD >> "$logs/source" 2>&1
+          [[ $(git -C source rev-parse HEAD) == "$SOURCE_COMMIT" ]]
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - uses: actions/setup-go@v6
+        with:
+          go-version: '1.27.0'
+          cache: false
+      - name: Verify and build Xray
+        working-directory: source
+        run: bash scripts/fetch-xray-macos.sh ${{ matrix.arch }} > "$SSN_LOGS/xray" 2>&1
+      - name: Check the client
+        working-directory: source
+        run: |
+          {
+            rustup update stable --no-self-update
+            npm ci
+            npm run check
+            npm run build
+            cargo +stable test --locked --manifest-path src-tauri/Cargo.toml
+          } > "$SSN_LOGS/check" 2>&1
+      - name: Build the disk image
+        working-directory: source
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: npm run tauri -- build --bundles app,dmg > "$SSN_LOGS/build" 2>&1
+      - name: Verify packaged utun
+        working-directory: source
+        run: |
+          {
+            hdiutil verify src-tauri/target/release/bundle/dmg/*.dmg
+            bash scripts/smoke-macos.sh src-tauri/target/release/bundle/macos/SuperStarNetwork.app
+          } > "$SSN_LOGS/smoke" 2>&1
+      - name: Upload the verified image
+        uses: actions/upload-artifact@v6
+        with:
+          name: superstar-network-macos-${{ matrix.arch }}
+          path: source/src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 3
+      - name: Encrypt diagnostics
+        if: failure() && env.SSN_LOGS != ''
+        env:
+          DIAGNOSTIC_KEY: ${{ secrets.DIAGNOSTIC_KEY }}
+        run: |
+          test -n "$DIAGNOSTIC_KEY"
+          tar -C "$SSN_LOGS" -czf "$RUNNER_TEMP/diagnostics.tgz" .
+          openssl enc -aes-256-cbc -pbkdf2 -salt -iter 250000 -pass env:DIAGNOSTIC_KEY \
+            -in "$RUNNER_TEMP/diagnostics.tgz" -out "$RUNNER_TEMP/diagnostics.enc"
+      - name: Upload encrypted diagnostics
+        if: failure() && env.SSN_LOGS != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: macos-diagnostics-${{ matrix.arch }}
+          path: ${{ runner.temp }}/diagnostics.enc
+          if-no-files-found: ignore
+          retention-days: 1
